@@ -632,9 +632,8 @@ TEST_CASE("A/B: RMS output levels at same settings") {
     CHECK(rms_auth < 1.0);
     CHECK(rms_flt  < 1.0);
 
-    // Document ratio — authentic uses 0.3f scaler, float uses 0.15f,
-    // so authentic is expected louder. Allow wide range since this is
-    // characterization.
+    // Both modes now share the same output gain. Their filters and phase
+    // arithmetic can still give different RMS values.
     double ratio = rms_auth / rms_flt;
     CHECK(ratio > 0.5);
     CHECK(ratio < 10.0);
@@ -731,6 +730,52 @@ TEST_CASE("A/B: zero-crossing frequency (pitch) between modes") {
     CHECK(freq_auth == doctest::Approx(freq_flt).epsilon(0.01));
 
     MESSAGE("A/B freq: auth=" << freq_auth << " Hz, flt=" << freq_flt << " Hz");
+}
+
+static double toneMagnitude(const std::vector<float>& samples, double freq) {
+    const double step = 6.283185307179586 * freq / kSampleRate;
+    double real = 0.0, imag = 0.0;
+    for (size_t i = 0; i < samples.size(); ++i) {
+        const double phase = step * static_cast<double>(i);
+        real += samples[i] * std::cos(phase);
+        imag += samples[i] * std::sin(phase);
+    }
+    return std::sqrt(real * real + imag * imag) / samples.size();
+}
+
+static double signalRms(const std::vector<float>& samples) {
+    double energy = 0.0;
+    for (float sample : samples) energy += static_cast<double>(sample) * sample;
+    return std::sqrt(energy / samples.size());
+}
+
+TEST_CASE("A/B: full mix preserves the note and comparable level") {
+    struct Setting { float detune, mix; };
+    const Setting settings[] = {
+        {0.0f, 0.0f}, {0.0f, 1.0f}, {0.5f, 1.0f},
+        {1.0f, 1.0f}, {1.0f, 0.5f}
+    };
+
+    for (const auto& setting : settings) {
+        const auto authentic = collectSamples(true, 440.0f, setting.detune,
+                                                setting.mix, 9600, 24000);
+        const auto modern = collectSamples(false, 440.0f, setting.detune,
+                                             setting.mix, 9600, 24000);
+        const double authenticFund = toneMagnitude(authentic, 440.0);
+        const double modernFund = toneMagnitude(modern, 440.0);
+        const double authenticSeven = toneMagnitude(authentic, 3080.0);
+        const double modernSeven = toneMagnitude(modern, 3080.0);
+        const double levelRatio = signalRms(authentic) / signalRms(modern);
+
+        INFO("detune=" << setting.detune << " mix=" << setting.mix
+             << " authentic f0/7f0=" << authenticFund / authenticSeven
+             << " modern f0/7f0=" << modernFund / modernSeven
+             << " RMS ratio=" << levelRatio);
+        CHECK(authenticFund > authenticSeven);
+        CHECK(modernFund > modernSeven);
+        CHECK(levelRatio > 0.5);
+        CHECK(levelRatio < 2.0);
+    }
 }
 
 // ============================================================================

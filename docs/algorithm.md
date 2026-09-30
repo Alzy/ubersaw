@@ -8,18 +8,20 @@ In December 2025, a researcher known as Giulioz presented **"From Silicon to Dar
 
 The revelation: **the supersaw is far simpler than anyone imagined.**
 
-## The complete algorithm
+## Oscillator structure
+
+This sketch shows the oscillator and mixer structure. The exact control mapping, filter response, and output gain still require comparison with original JP-8000 output.
 
 ```c
 int24_t saw[7] = {0};  // Phase accumulators (randomized on note-on)
 
 const int24_t detune_table[7] = { 0, 128, -128, 816, -824, 1408, -1440 };
 
-int24_t next(int24_t pitch, int24_t spread, int24_t detune) {
-    int24_t sum = 0;
+int32_t next(int24_t pitch, int24_t spread, int24_t detune) {
+    int32_t sum = 0;  // Wide enough for all seven oscillator outputs.
     for (int i = 0; i < 7; i++) {
         int24_t voice_detune = (detune_table[i] * (pitch * detune)) >> 7;
-        saw[i] += pitch + voice_detune;
+        saw[i] = wrap24(saw[i] + pitch + voice_detune);
         if (i == 0)
             sum += saw[i];
         else
@@ -61,7 +63,7 @@ The formula `(detune_table[i] * (pitch * detune)) >> 7` makes detuning proportio
 
 ### The mixing formula
 
-The center oscillator always runs at full volume. The six side oscillators are each multiplied by the `spread` (Mix) parameter before being summed. At Mix = 0, you hear a single sawtooth. As Mix increases, the detuned oscillators fade in, building the classic supersaw wall of sound.
+The center oscillator always runs at full volume. The six side oscillators are each multiplied by the `spread` (Mix) parameter before being summed. At Mix = 0, you hear a single sawtooth. As Mix increases, the detuned oscillators fade in, building the classic supersaw wall of sound. The individual phase accumulators wrap at 24 bits; the combined signal must retain enough bits for all seven contributions. Wrapping the mixer sum to 24 bits at full mix instead produces a single ramp near seven times the requested frequency.
 
 ### The high-pass filter
 
@@ -99,7 +101,7 @@ int32_t Wrap24(int32_t val) {
 }
 ```
 
-This must be applied after every arithmetic operation that could exceed 24-bit range: additions, multiplications, and the phase accumulator advance.
+This is applied to each saw's phase advance. The mixer and high-pass filter retain a wider signal range; the oscillator output uses one shared gain in both the fixed-point and floating-point modes. Whether their detailed spectra match the original JP-8000 still requires comparison with a reference recording.
 
 ### Filter implementation
 

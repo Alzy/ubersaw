@@ -5,6 +5,12 @@
 #include "supersaw.h"
 #include <cmath>
 
+namespace {
+// Leave headroom for coincident saw edges before voices are mixed by the synth.
+// Both processing modes use the same gain for comparable levels.
+constexpr float kOutputGain = 0.09f;
+}
+
 // The original detune table from the TC170C140 firmware.
 // These values are asymmetric — the negative offsets are slightly larger
 // than the positive ones. This asymmetry was confirmed by both the
@@ -195,9 +201,9 @@ float SuperSaw::Process() {
         int32_t raw = ProcessAuthentic();
         if (fixed_point_hpf_) {
             int32_t filtered = hpf24_.Process(raw);
-            return Int24ToFloat(filtered) * 0.3f;
+            return Int24ToFloat(filtered) * kOutputGain;
         } else {
-            return hpf_.Process(Int24ToFloat(raw) * 0.3f);
+            return hpf_.Process(Int24ToFloat(raw) * kOutputGain);
         }
     } else {
         float raw = ProcessFloat();
@@ -214,11 +220,11 @@ void SuperSaw::ProcessStereo(float& left, float& right) {
         if (fixed_point_hpf_) {
             l24 = hpf24_.Process(l24);
             r24 = hpf24_r_.Process(r24);
-            left  = Int24ToFloat(l24) * 0.3f;
-            right = Int24ToFloat(r24) * 0.3f;
+            left  = Int24ToFloat(l24) * kOutputGain;
+            right = Int24ToFloat(r24) * kOutputGain;
         } else {
-            left  = hpf_.Process(Int24ToFloat(l24) * 0.3f);
-            right = hpf_r_.Process(Int24ToFloat(r24) * 0.3f);
+            left  = hpf_.Process(Int24ToFloat(l24) * kOutputGain);
+            right = hpf_r_.Process(Int24ToFloat(r24) * kOutputGain);
         }
     } else {
         ProcessFloatStereo(left, right);
@@ -234,9 +240,9 @@ void SuperSaw::ProcessBlock(float* out, size_t n) {
             int32_t raw = ProcessAuthentic();
             if (fixed_point_hpf_) {
                 int32_t filtered = hpf24_.Process(raw);
-                out[i] = Int24ToFloat(filtered) * 0.3f;
+                out[i] = Int24ToFloat(filtered) * kOutputGain;
             } else {
-                out[i] = hpf_.Process(Int24ToFloat(raw) * 0.3f);
+                out[i] = hpf_.Process(Int24ToFloat(raw) * kOutputGain);
             }
         }
     } else {
@@ -256,11 +262,11 @@ void SuperSaw::ProcessBlockStereo(float* left, float* right, size_t n) {
             if (fixed_point_hpf_) {
                 l24 = hpf24_.Process(l24);
                 r24 = hpf24_r_.Process(r24);
-                left[i]  = Int24ToFloat(l24) * 0.3f;
-                right[i] = Int24ToFloat(r24) * 0.3f;
+                left[i]  = Int24ToFloat(l24) * kOutputGain;
+                right[i] = Int24ToFloat(r24) * kOutputGain;
             } else {
-                left[i]  = hpf_.Process(Int24ToFloat(l24) * 0.3f);
-                right[i] = hpf_r_.Process(Int24ToFloat(r24) * 0.3f);
+                left[i]  = hpf_.Process(Int24ToFloat(l24) * kOutputGain);
+                right[i] = hpf_r_.Process(Int24ToFloat(r24) * kOutputGain);
             }
         }
     } else {
@@ -277,12 +283,15 @@ int32_t SuperSaw::ProcessAuthentic() {
     // ====================================================================
     // AUTHENTIC JP-8000 ALGORITHM — 24-bit fixed-point
     // ====================================================================
-    // This matches the reverse-engineered TC170C140 ESP2 firmware.
-    // All arithmetic wraps at 24 bits, emulating the original hardware's
-    // natural integer overflow behavior.
-    // Returns raw 24-bit sum (caller applies HPF + normalization).
+    // Uses the reverse-engineered 24-bit saw phase structure. The parameter
+    // mapping and filter still need direct comparison with JP-8000 output.
+    // Oscillator phases wrap at 24 bits. The mixer uses a wider accumulator:
+    // wrapping the sum would collapse seven saws into a single ramp at
+    // approximately seven times the requested frequency at full mix.
+    // Returns the wide sum in phase units (caller applies HPF + output gain).
     // ====================================================================
 
+    // Seven signed 24-bit phases fit within a signed 32-bit accumulator.
     int32_t sum = 0;
 
     for (int i = 0; i < voice_count_; i++) {
@@ -307,7 +316,7 @@ int32_t SuperSaw::ProcessAuthentic() {
 
         // Mix: center oscillator at full volume, side oscillators scaled
         if (i == 0) {
-            sum = Wrap24(sum + saw_[i]);
+            sum += saw_[i];
         } else {
             // In the original, 'spread' is a 24-bit fixed-point multiply.
             // We approximate with float for the mixing stage since the
@@ -315,7 +324,7 @@ int32_t SuperSaw::ProcessAuthentic() {
             int32_t scaled = static_cast<int32_t>(
                 static_cast<float>(saw_[i]) * mix_ * mix_
             );
-            sum = Wrap24(sum + scaled);
+            sum += scaled;
         }
     }
 
@@ -367,13 +376,13 @@ float SuperSaw::ProcessFloat() {
         }
     }
 
-    return sum * 0.15f;
+    return sum * kOutputGain;
 }
 
 void SuperSaw::ProcessAuthenticStereo(int32_t& left, int32_t& right) {
     // Same oscillator advancement as ProcessAuthentic, but accumulates
     // into separate L/R sums based on detune direction and spread.
-    // Returns raw 24-bit sums; caller applies HPF + normalization.
+    // Returns wide sums in phase units; caller applies HPF + output gain.
 
     int32_t sum_l = 0;
     int32_t sum_r = 0;
@@ -389,16 +398,16 @@ void SuperSaw::ProcessAuthenticStereo(int32_t& left, int32_t& right) {
         saw_[i] = Wrap24(saw_[i] + pitch_inc_ + voice_detune);
 
         if (i == 0) {
-            sum_l = Wrap24(sum_l + saw_[i]);
-            sum_r = Wrap24(sum_r + saw_[i]);
+            sum_l += saw_[i];
+            sum_r += saw_[i];
         } else {
             int32_t scaled = static_cast<int32_t>(
                 static_cast<float>(saw_[i]) * mix_ * mix_
             );
             float pan_r = 0.5f + (i % 2 == 1 ? spread_ * 0.5f : -spread_ * 0.5f);
             float pan_l = 1.0f - pan_r;
-            sum_l = Wrap24(sum_l + static_cast<int32_t>(static_cast<float>(scaled) * pan_l * 2.0f));
-            sum_r = Wrap24(sum_r + static_cast<int32_t>(static_cast<float>(scaled) * pan_r * 2.0f));
+            sum_l += static_cast<int32_t>(static_cast<float>(scaled) * pan_l * 2.0f);
+            sum_r += static_cast<int32_t>(static_cast<float>(scaled) * pan_r * 2.0f);
         }
     }
 
@@ -447,8 +456,8 @@ void SuperSaw::ProcessFloatStereo(float& left, float& right) {
         }
     }
 
-    left  = sum_l * 0.15f;
-    right = sum_r * 0.15f;
+    left  = sum_l * kOutputGain;
+    right = sum_r * kOutputGain;
 }
 
 // ============================================================================

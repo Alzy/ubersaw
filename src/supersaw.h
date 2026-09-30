@@ -70,8 +70,7 @@ public:
     /// floating-point mode (false). Default: true.
     void SetAuthentic(bool authentic);
 
-    /// Enable 24-bit fixed-point HPF in authentic mode (matches ESP2).
-    /// Default: false (uses float HPF for backwards compatibility).
+    /// Enable fixed-point HPF in authentic mode. Default: true.
     void SetFixedPointHpf(bool enabled);
 
     /// Process a block of N samples. Updates params once per block.
@@ -119,7 +118,7 @@ private:
         return Wrap24(static_cast<int32_t>(prod >> 23));
     }
 
-    /// Convert a 24-bit signed integer to a normalized float [-1, 1].
+    /// Scale phase units to float. A wide oscillator mix may exceed [-1, 1].
     static inline float Int24ToFloat(int32_t val) {
         return static_cast<float>(val) / static_cast<float>(INT24_MAX);
     }
@@ -146,8 +145,8 @@ private:
         float coeff = 0.999f;  // Filter coefficient (close to 1 = low cutoff)
     };
 
-    // 24-bit fixed-point one-pole HPF matching TC170C140 ESP2 arithmetic.
-    // Uses Q1.23 fractional format with Mul24Frac for coefficient multiply.
+    // Fixed-point one-pole HPF. The coefficient is Q1.23; input and state
+    // retain the wider mix range so the sum is never wrapped to 24 bits.
     struct HighPass24 {
         int32_t y1 = 0;   // Previous output (Q23)
         int32_t x1 = 0;   // Previous input (Q23)
