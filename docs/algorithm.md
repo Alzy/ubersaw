@@ -10,28 +10,29 @@ The revelation: **the supersaw is far simpler than anyone imagined.**
 
 ## Oscillator structure
 
-This sketch shows the oscillator and mixer structure. The exact control mapping, filter response, and output gain still require comparison with original JP-8000 output.
+This sketch shows the oscillator and mixer structure calibrated to the frequency offsets and gain curves measured by Adam Szabo. It is a behavioral model, not a transcription of the DSP program. Filter response and output gain still require comparison with original JP-8000 output.
 
 ```c
 int24_t saw[7] = {0};  // Phase accumulators (randomized on note-on)
 
-const int24_t detune_table[7] = { 0, 128, -128, 816, -824, 1408, -1440 };
+const float ratio[7] = { 0, 0.01991221, -0.01952356,
+                         0.06216538, -0.06288439,
+                         0.10745242, -0.11002313 };
 
-int32_t next(int24_t pitch, int24_t spread, int24_t detune) {
+int32_t next(int24_t pitch, float shaped_detune, float mix) {
+    float center_gain = 0.99785 - 0.55366 * mix;
+    float side_gain = 0.044372 + 1.2841 * mix - 0.73764 * mix * mix;
     int32_t sum = 0;  // Wide enough for all seven oscillator outputs.
     for (int i = 0; i < 7; i++) {
-        int24_t voice_detune = (detune_table[i] * (pitch * detune)) >> 7;
+        int24_t voice_detune = pitch * shaped_detune * ratio[i];
         saw[i] = wrap24(saw[i] + pitch + voice_detune);
-        if (i == 0)
-            sum += saw[i];
-        else
-            sum += saw[i] * spread;
+        sum += saw[i] * (i == 0 ? center_gain : side_gain);
     }
     return high_pass(sum);
 }
 ```
 
-This function is called once per sample at **88,200 Hz** (derived from the system clock: 67.7376 MHz / (16 x 3 x 16) = 88,200).
+The JP-8000's internal rate was approximately **88,200 Hz** (67.7376 MHz / (16 x 3 x 16)); this implementation runs the oscillator at **96,000 Hz**.
 
 ## Why it works: component breakdown
 
@@ -41,29 +42,26 @@ Each oscillator is a 24-bit integer that increments by `pitch + voice_detune` ev
 
 This is the simplest possible sawtooth generator: a counter that overflows.
 
-### The detune table
+### Measured detune offsets
 
-The seven offsets are **asymmetric by design**:
+The seven full-detune frequency offsets measured from JP-8000 audio are asymmetric:
 
-| Oscillator | Detune offset | Role          |
-|-----------|---------------|---------------|
-| 0         | 0             | Center (undetuned) |
-| 1         | +128          | Nearest pair, slightly sharp |
-| 2         | -128          | Nearest pair, slightly flat |
-| 3         | +816          | Middle pair, sharp |
-| 4         | -824          | Middle pair, flat (8 wider than +816) |
-| 5         | +1408         | Widest pair, sharp |
-| 6         | -1440         | Widest pair, flat (32 wider than +1408) |
+| Oscillator | Frequency offset | Role |
+|-----------|------------------|------|
+| 0 | 0 | Center |
+| 1 / 2 | +1.991% / -1.952% | Inner pair |
+| 3 / 4 | +6.217% / -6.288% | Middle pair |
+| 5 / 6 | +10.745% / -11.002% | Outer pair |
 
 The asymmetry means the detuned oscillators are not perfectly mirrored around the fundamental. This subtle imperfection prevents the sterile sound of perfectly symmetric detuning: it adds organic width and movement.
 
 ### Pitch-proportional detuning
 
-The formula `(detune_table[i] * (pitch * detune)) >> 7` makes detuning proportional to pitch. A note one octave higher gets twice the absolute detuning, maintaining consistent musical-interval spread across the keyboard. The `>> 7` right-shift (divide by 128) scales the result to a usable range.
+The formula `pitch * (1 + shaped_detune * ratio[i])` makes detuning proportional to pitch. A note one octave higher gets twice the absolute detuning, maintaining consistent musical-interval spread across the keyboard. The detune knob uses Szabo's nonlinear fitted curve, evaluated at control update time in double precision. Its zero endpoint is forced to exact unison.
 
 ### The mixing formula
 
-The center oscillator always runs at full volume. The six side oscillators are each multiplied by the `spread` (Mix) parameter before being summed. At Mix = 0, you hear a single sawtooth. As Mix increases, the detuned oscillators fade in, building the classic supersaw wall of sound. The individual phase accumulators wrap at 24 bits; the combined signal must retain enough bits for all seven contributions. Wrapping the mixer sum to 24 bits at full mix instead produces a single ramp near seven times the requested frequency.
+Szabo measured a center gain of `0.99785 - 0.55366 * mix` and a gain for each side oscillator of `0.044372 + 1.2841 * mix - 0.73764 * mix^2`. The center falls as Mix rises, and the side voices retain a small level even at Mix = 0. The individual phase accumulators wrap at 24 bits; the combined signal must retain enough bits for all seven contributions. Wrapping the mixer sum to 24 bits at full mix instead produces a single ramp near seven times the requested frequency.
 
 ### The high-pass filter
 
@@ -80,8 +78,8 @@ On every note-on event, all seven oscillators receive random starting phases. Th
 In 2010, Adam Szabo (KTH Stockholm) published "How to Emulate the Super Saw," a black-box analysis based on FFT and oscilloscope measurements of JP-8000 output. His findings were remarkably close:
 
 - **Correctly identified:** 7 sawtooths, pitch-tracked HPF, asymmetric detuning, random phases, aliasing contribution
-- **Approximated with an 11th-degree polynomial:** The perceived non-linear detune curve. The actual implementation uses simple fixed-point integer multiplication: the perceived non-linearity emerges from the parameter mapping
-- **Complex mix equations:** Szabo measured center volume decreasing and side volume increasing parabolically. The actual code is simpler: fixed center gain, linear side scaling by a single parameter
+- **Approximated with an 11th-degree polynomial:** The nonlinear detune knob response measured from hardware output.
+- **Measured mix equations:** The center volume decreases while the side volume follows a parabola. Our implementation uses these curves until direct comparison with JP-8000 audio can settle the exact control mapping.
 
 Szabo's paper was the best available reference for 15 years. The reverse engineering confirms his fundamental insights while revealing just how minimal the actual code is.
 

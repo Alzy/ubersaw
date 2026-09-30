@@ -9,13 +9,17 @@ namespace {
 // Leave headroom for coincident saw edges before voices are mixed by the synth.
 // Both processing modes use the same gain for comparable levels.
 constexpr float kOutputGain = 0.09f;
+
+// Adam Szabo, "How to Emulate the Super Saw", section 3.2.
+inline float CenterGain(float mix) { return 0.99785f - 0.55366f * mix; }
+inline float SideGain(float mix) {
+    return 0.044372f + mix * (1.2841f - 0.73764f * mix);
+}
 }
 
-// The original detune table from the TC170C140 firmware.
-// These values are asymmetric — the negative offsets are slightly larger
-// than the positive ones. This asymmetry was confirmed by both the
-// reverse engineering and Adam Szabo's earlier spectral analysis.
-constexpr int32_t SuperSaw::kDetuneTable[NUM_OSCS];
+// Frequency offsets measured from JP-8000 output by Adam Szabo (Table 1).
+// The exact DSP parameter encoding has not been verified in this project.
+constexpr float SuperSaw::kDetuneRatios[NUM_OSCS];
 
 // ============================================================================
 // Lifecycle
@@ -101,33 +105,37 @@ void SuperSaw::SetDetune(float detune) {
     // Apply Szabo 11th-order polynomial curve to shape the detune knob response.
     // The JP-8000 uses a non-linear curve: gentle at low settings, aggressive
     // at the top. Coefficients from Adam Szabo's thesis "How to Emulate the
-    // Super Saw", confirmed by 39C3 reverse engineering / JE-8086 emulator.
+    // Super Saw". The fitted curve is evaluated when controls change.
     //
     // Polynomial: detune(x) = c0*x^11 + c1*x^10 + ... + c10*x + c11
-    // Input x in [0,1], output ≈ [0.003, 1.0]
-    float x = detune;
-    if (x < 0.0f) x = 0.0f;
-    if (x > 1.0f) x = 1.0f;
+    // Input x in [0,1], output [0,1] after endpoint correction and clamp.
+    double x = detune;
+    if (x < 0.0) x = 0.0;
+    if (x > 1.0) x = 1.0;
 
-    // Horner's method for numerical stability and efficiency
-    float shaped = ((((((((((10028.7312891634f * x
-                     - 50818.8652045924f) * x
-                     + 111363.4808729368f) * x
-                     - 138150.6761080548f) * x
-                     + 106649.6679158292f) * x
-                     - 53046.9642751875f) * x
-                     + 17019.9518580080f) * x
-                     - 3425.0836591318f) * x
-                     + 404.2703938388f) * x
-                     - 24.1878824391f) * x
-                     + 0.6717417634f) * x
-                     + 0.0030115596f;
-
-    target_detune_ = shaped;
+    // Double precision avoids cancellation among the large coefficients.
+    double shaped = ((((((((((10028.7312891634 * x
+                     - 50818.8652045924) * x
+                     + 111363.4808729368) * x
+                     - 138150.6761080548) * x
+                     + 106649.6679158292) * x
+                     - 53046.9642751875) * x
+                     + 17019.9518580080) * x
+                     - 3425.0836591318) * x
+                     + 404.2703938388) * x
+                     - 24.1878824391) * x
+                     + 0.6717417634) * x
+                     + 0.0030115596;
+    // The fit has a small nonzero intercept; the measured zero setting is unison.
+    if (x == 0.0) shaped = 0.0;
+    if (shaped < 0.0) shaped = 0.0;
+    if (shaped > 1.0) shaped = 1.0;
+    target_detune_ = static_cast<float>(shaped);
 }
 
 void SuperSaw::SetMix(float mix) {
-    // 0.0 = center oscillator only, 1.0 = full side oscillator volume
+    if (mix < 0.0f) mix = 0.0f;
+    if (mix > 1.0f) mix = 1.0f;
     target_mix_ = mix;
 }
 
@@ -281,7 +289,7 @@ void SuperSaw::ProcessBlockStereo(float* left, float* right, size_t n) {
 
 int32_t SuperSaw::ProcessAuthentic() {
     // ====================================================================
-    // AUTHENTIC JP-8000 ALGORITHM — 24-bit fixed-point
+    // JP-8000-STYLE OSCILLATOR — 24-bit wrapped saw phases
     // ====================================================================
     // Uses the reverse-engineered 24-bit saw phase structure. The parameter
     // mapping and filter still need direct comparison with JP-8000 output.
@@ -293,20 +301,15 @@ int32_t SuperSaw::ProcessAuthentic() {
 
     // Seven signed 24-bit phases fit within a signed 32-bit accumulator.
     int32_t sum = 0;
+    const float pitch_x_detune = static_cast<float>(pitch_inc_) * detune_amount_;
+    const float center_gain = CenterGain(mix_);
+    const float side_gain = SideGain(mix_);
 
     for (int i = 0; i < voice_count_; i++) {
-        // Calculate per-voice detuning:
-        //   voice_detune = (detune_table[i] * pitch_x_detune) >> 7
-        //
-        // Scaling: full detune (1.0) → ~1 semitone spread on widest pair.
-        //   max ratio = 2^(1/12) - 1 ≈ 0.0595
-        //   kMaxDetuneScaled = 0.0595 * 128 / 1440 ≈ 0.00529
-        static constexpr float kMaxDetuneScaled = 0.00529f;
-        int32_t pitch_x_detune = static_cast<int32_t>(
-            static_cast<float>(pitch_inc_) * detune_amount_ * kMaxDetuneScaled
-        );
-        int32_t voice_detune = (static_cast<int64_t>(kDetuneTable[i]) * pitch_x_detune) >> 7;
-        voice_detune = Wrap24(voice_detune);
+        // The measured offsets are frequency ratios, so each oscillator's
+        // increment is base pitch plus base pitch * shaped detune * ratio.
+        const int32_t voice_detune = static_cast<int32_t>(
+            pitch_x_detune * kDetuneRatios[i]);
 
         // Advance phase accumulator.
         // The sawtooth waveform IS the phase value — when the 24-bit
@@ -314,18 +317,8 @@ int32_t SuperSaw::ProcessAuthentic() {
         // sawtooth edge. No wavetable, no shaping, no anti-aliasing.
         saw_[i] = Wrap24(saw_[i] + pitch_inc_ + voice_detune);
 
-        // Mix: center oscillator at full volume, side oscillators scaled
-        if (i == 0) {
-            sum += saw_[i];
-        } else {
-            // In the original, 'spread' is a 24-bit fixed-point multiply.
-            // We approximate with float for the mixing stage since the
-            // critical character comes from the oscillator arithmetic.
-            int32_t scaled = static_cast<int32_t>(
-                static_cast<float>(saw_[i]) * mix_ * mix_
-            );
-            sum += scaled;
-        }
+        const float gain = i == 0 ? center_gain : side_gain;
+        sum += static_cast<int32_t>(static_cast<float>(saw_[i]) * gain);
     }
 
     return sum;
@@ -342,26 +335,12 @@ float SuperSaw::ProcessFloat() {
     float sum = 0.0f;
     float phase_inc = freq_hz_ / sample_rate_;
 
-    // Approximate detune ratios derived from the original table.
-    // These are normalized: detune_table[i] / 1440 gives relative spread.
-    static constexpr float kDetuneRatios[NUM_OSCS] = {
-        0.0f,
-        128.0f / 1440.0f,    //  0.0889
-       -128.0f / 1440.0f,    // -0.0889
-        816.0f / 1440.0f,    //  0.5667
-       -824.0f / 1440.0f,    // -0.5722
-        1408.0f / 1440.0f,   //  0.9778
-       -1440.0f / 1440.0f    // -1.0000
-    };
-
-    // Max detune in semitones at full detune setting (~1 semitone, matching authentic)
-    float max_detune_semitones = 1.0f;
-    float detune_factor = detune_amount_ * max_detune_semitones;
+    const float center_gain = CenterGain(mix_);
+    const float side_gain = SideGain(mix_);
 
     for (int i = 0; i < voice_count_; i++) {
-        // Calculate detuned frequency
-        float detune_st = kDetuneRatios[i] * detune_factor;
-        float detuned_inc = phase_inc * powf(2.0f, detune_st / 12.0f);
+        const float detuned_inc = phase_inc
+            * (1.0f + detune_amount_ * kDetuneRatios[i]);
 
         // Advance phase accumulator (wraps at ±1.0)
         saw_f_[i] += detuned_inc * 2.0f;
@@ -369,11 +348,7 @@ float SuperSaw::ProcessFloat() {
         if (saw_f_[i] < -1.0f) saw_f_[i] += 2.0f;
 
         // Mix
-        if (i == 0) {
-            sum += saw_f_[i];
-        } else {
-            sum += saw_f_[i] * mix_ * mix_;
-        }
+        sum += saw_f_[i] * (i == 0 ? center_gain : side_gain);
     }
 
     return sum * kOutputGain;
@@ -386,23 +361,24 @@ void SuperSaw::ProcessAuthenticStereo(int32_t& left, int32_t& right) {
 
     int32_t sum_l = 0;
     int32_t sum_r = 0;
+    const float pitch_x_detune = static_cast<float>(pitch_inc_) * detune_amount_;
+    const float center_gain = CenterGain(mix_);
+    const float side_gain = SideGain(mix_);
 
     for (int i = 0; i < voice_count_; i++) {
-        static constexpr float kMaxDetuneScaled = 0.00529f;
-        int32_t pitch_x_detune = static_cast<int32_t>(
-            static_cast<float>(pitch_inc_) * detune_amount_ * kMaxDetuneScaled
-        );
-        int32_t voice_detune = (static_cast<int64_t>(kDetuneTable[i]) * pitch_x_detune) >> 7;
-        voice_detune = Wrap24(voice_detune);
+        const int32_t voice_detune = static_cast<int32_t>(
+            pitch_x_detune * kDetuneRatios[i]);
 
         saw_[i] = Wrap24(saw_[i] + pitch_inc_ + voice_detune);
 
         if (i == 0) {
-            sum_l += saw_[i];
-            sum_r += saw_[i];
+            const int32_t center = static_cast<int32_t>(
+                static_cast<float>(saw_[i]) * center_gain);
+            sum_l += center;
+            sum_r += center;
         } else {
             int32_t scaled = static_cast<int32_t>(
-                static_cast<float>(saw_[i]) * mix_ * mix_
+                static_cast<float>(saw_[i]) * side_gain
             );
             float pan_r = 0.5f + (i % 2 == 1 ? spread_ * 0.5f : -spread_ * 0.5f);
             float pan_l = 1.0f - pan_r;
@@ -422,33 +398,22 @@ void SuperSaw::ProcessFloatStereo(float& left, float& right) {
     float sum_l = 0.0f;
     float sum_r = 0.0f;
     float phase_inc = freq_hz_ / sample_rate_;
-
-    static constexpr float kDetuneRatios[NUM_OSCS] = {
-        0.0f,
-        128.0f / 1440.0f,
-       -128.0f / 1440.0f,
-        816.0f / 1440.0f,
-       -824.0f / 1440.0f,
-        1408.0f / 1440.0f,
-       -1440.0f / 1440.0f
-    };
-
-    float max_detune_semitones = 1.0f;
-    float detune_factor = detune_amount_ * max_detune_semitones;
+    const float center_gain = CenterGain(mix_);
+    const float side_gain = SideGain(mix_);
 
     for (int i = 0; i < voice_count_; i++) {
-        float detune_st = kDetuneRatios[i] * detune_factor;
-        float detuned_inc = phase_inc * powf(2.0f, detune_st / 12.0f);
+        const float detuned_inc = phase_inc
+            * (1.0f + detune_amount_ * kDetuneRatios[i]);
 
         saw_f_[i] += detuned_inc * 2.0f;
         if (saw_f_[i] >= 1.0f) saw_f_[i] -= 2.0f;
         if (saw_f_[i] < -1.0f) saw_f_[i] += 2.0f;
 
         if (i == 0) {
-            sum_l += saw_f_[i];
-            sum_r += saw_f_[i];
+            sum_l += saw_f_[i] * center_gain;
+            sum_r += saw_f_[i] * center_gain;
         } else {
-            float val = saw_f_[i] * mix_ * mix_;
+            float val = saw_f_[i] * side_gain;
             float pan_r = 0.5f + (i % 2 == 1 ? spread_ * 0.5f : -spread_ * 0.5f);
             float pan_l = 1.0f - pan_r;
             sum_l += val * pan_l * 2.0f;

@@ -6,8 +6,8 @@
 //
 // Architecture:
 //   - 7 naive sawtooth phase accumulators (no band-limiting)
-//   - 24-bit fixed-point integer arithmetic with natural overflow wrapping
-//   - Asymmetric detune table: {0, 128, -128, 816, -824, 1408, -1440}
+//   - 24-bit phase accumulators with wrapping at each saw edge
+//   - Asymmetric frequency offsets measured from the JP-8000 by Adam Szabo
 //   - Pitch-tracked high-pass filter on output
 //   - Random phase initialization on note trigger
 //
@@ -53,7 +53,7 @@ public:
     void SetDetune(float detune);
 
     /// Set mix/spread between center and side oscillators.
-    /// 0.0 = center only, 1.0 = full side oscillator mix.
+    /// 0.0 = minimum side level, 1.0 = full side oscillator mix.
     void SetMix(float mix);
 
     /// Set high-pass filter cutoff as an offset ratio from the fundamental.
@@ -187,9 +187,11 @@ private:
 
     float sample_rate_ = 96000.0f;
 
-    // The original JP-8000 detune table — asymmetric by design
-    static constexpr int32_t kDetuneTable[NUM_OSCS] = {
-        0, 128, -128, 816, -824, 1408, -1440
+    // Measured JP-8000 frequency offsets at full detune (Szabo, Table 1).
+    static constexpr float kDetuneRatios[NUM_OSCS] = {
+        0.0f, 0.01991221f, -0.01952356f,
+        0.06216538f, -0.06288439f,
+        0.10745242f, -0.11002313f
     };
 
     // Oscillator phase accumulators (24-bit fixed-point)
@@ -198,7 +200,7 @@ private:
     // Parameters (in engine-internal formats)
     int32_t pitch_inc_ = 0;       // Base pitch as 24-bit phase increment
     float   detune_amount_ = 0.0f;// Detune amount (0.0 = unison, 1.0 = max spread)
-    float   mix_ = 1.0f;          // Side oscillator mix (0..1)
+    float   mix_ = 1.0f;          // Supersaw mix control (0..1)
     float   freq_hz_ = 440.0f;    // Current frequency for filter tracking
     float   filter_offset_ = 1.0f;// HPF cutoff offset ratio
     bool    authentic_ = true;     // True = 24-bit mode, false = float mode

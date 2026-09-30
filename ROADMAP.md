@@ -5,7 +5,7 @@
 - [x] Project scaffold and build system
 - [x] 7-oscillator phase accumulator with 24-bit fixed-point arithmetic
 - [x] Original detune table implementation
-- [x] Basic mixing (center full volume, sides scaled by spread)
+- [x] Basic mixing (measured center and side gain curves)
 - [x] One-pole pitch-tracked high-pass filter
 - [x] Random phase initialization on gate trigger
 - [x] Verify V/Oct tracking accuracy across 5+ octaves

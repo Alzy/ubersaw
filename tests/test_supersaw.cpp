@@ -165,7 +165,7 @@ TEST_CASE("Float mode: detune works when mix is zero") {
 
     // With mix=0 and detune=1, center osc should still be detuned
     // (center detune_table[0] = 0, so center osc is NOT detuned —
-    //  but side oscs ARE detuned even though mixed at 0 volume.
+    //  but side oscs ARE detuned even at the minimum measured mix level.
     //  The key point: SetDetune should not be gated by mix.)
     ss.SetMix(0.0f);
     ss.SetDetune(1.0f);
@@ -243,7 +243,7 @@ TEST_CASE("VoctToFreq: clamps to upper bound") {
 // ============================================================================
 
 TEST_CASE("Full detune maintains periodicity near fundamental") {
-    // With correct detune (~1 semitone max spread), the 7 oscillators are
+    // With the measured detune (~11% max spread), the 7 oscillators are
     // close enough in frequency that autocorrelation at the fundamental
     // period remains strong. With broken scaling (1000+ cents), it drops
     // to near zero because oscillators are at wildly different frequencies.
@@ -270,7 +270,7 @@ TEST_CASE("Full detune maintains periodicity near fundamental") {
     }
     double normalized = autocorr / energy;
 
-    // With ~1 semitone spread: autocorrelation > 0.1 (beating but periodic)
+    // With the measured spread: autocorrelation > 0.1 (beating but periodic)
     // With broken scaling: autocorrelation ≈ 0 (noise-like)
     CHECK(normalized > 0.1);
 }
@@ -311,46 +311,43 @@ TEST_CASE("HPF removes DC offset from output") {
 }
 
 // ============================================================================
-// Parabolic mix curve (Szabo)
+// Measured center and side mix curves (Szabo)
 // ============================================================================
 
-TEST_CASE("Mix curve is parabolic, not linear (authentic)") {
-    // With detune=0 and deterministic init (all phases zero), all 7 oscs
-    // produce identical values. Output amplitude factor = 1 + 6*mix_eff.
-    // Parabolic: mix_eff = mix^2, so mix=0.5 -> factor = 1 + 6*0.25 = 2.5
-    // Linear:    mix_eff = mix,   so mix=0.5 -> factor = 1 + 6*0.5  = 4.0
-    //
-    // Use low freq so phase values stay small and 24-bit sum doesn't wrap.
-    // Minimize HPF impact with very low filter offset.
-    // Settle 500 samples for parameter smoothers, keep phase < INT24_MAX/7.
+TEST_CASE("Measured mix gains combine correctly in authentic mode") {
+    // With detune zero and zero initial phase, all seven oscillators produce
+    // the same saw. Their combined gain is center + six times side gain.
+    // One hertz keeps the phase below its wrap while controls settle.
     auto getSample = [](float mix) {
         SuperSaw ss;
         ss.Init(kSampleRate);
-        ss.SetFreq(10.0f);
+        ss.SetFreq(1.0f);
         ss.SetDetune(0.0f);
         ss.SetAuthentic(true);
-        ss.SetFilterOffset(0.01f);
         ss.SetMix(mix);
-        // Settle parameter smoothers (~500 samples for 99% at coeff=0.99).
-        // At 10 Hz, 500 samples → phase ≈ 875k (< INT24_MAX/7 = 1.2M), no wrap.
-        for (int i = 0; i < 500; i++) ss.Process();
+        // Settle parameter smoothers without wrapping the saw phase.
+        for (int i = 0; i < 2000; i++) ss.Process();
         return ss.Process();
     };
 
-    float s_center = getSample(0.0f);  // 1 osc only
-    float s_half   = getSample(0.5f);  // parabolic: 1 + 6*0.25 = 2.5x
-    float s_full   = getSample(1.0f);  // 1 + 6*1.0 = 7.0x
+    float s_center = getSample(0.0f);
+    float s_half   = getSample(0.5f);
+    float s_full   = getSample(1.0f);
 
     float ratio_half = s_half / s_center;
     float ratio_full = s_full / s_center;
 
-    CHECK(ratio_full == doctest::Approx(7.0f).epsilon(0.10));
-    CHECK(ratio_half == doctest::Approx(2.5f).epsilon(0.10));
+    const float gain_zero = 0.99785f + 6.0f * 0.044372f;
+    const float gain_half = (0.99785f - 0.55366f * 0.5f)
+        + 6.0f * (0.044372f + 1.2841f * 0.5f - 0.73764f * 0.25f);
+    const float gain_full = (0.99785f - 0.55366f)
+        + 6.0f * (0.044372f + 1.2841f - 0.73764f);
+    CHECK(ratio_full == doctest::Approx(gain_full / gain_zero).epsilon(0.02));
+    CHECK(ratio_half == doctest::Approx(gain_half / gain_zero).epsilon(0.02));
 }
 
-TEST_CASE("Mix curve is parabolic, not linear (float mode)") {
-    // Float mode: no wrapping, use energy over time with phase-locked oscs.
-    // Energy ∝ (1 + 6*m_eff)^2. Parabolic: ratio = (2.5/7)^2 ≈ 0.128
+TEST_CASE("Measured mix gains combine correctly in float mode") {
+    // Float mode: with zero detune, energy tracks squared total gain.
     auto measureEnergy = [](float mix) {
         SuperSaw ss;
         ss.Init(kSampleRate);
@@ -372,9 +369,33 @@ TEST_CASE("Mix curve is parabolic, not linear (float mode)") {
     double e_half = measureEnergy(0.5f);
     double ratio = e_half / e_full;
 
-    // Parabolic: ~0.128; Linear: ~0.327
-    CHECK(ratio < 0.22);
-    CHECK(ratio > 0.05);
+    const double gain_half = (0.99785 - 0.55366 * 0.5)
+        + 6.0 * (0.044372 + 1.2841 * 0.5 - 0.73764 * 0.25);
+    const double gain_full = (0.99785 - 0.55366)
+        + 6.0 * (0.044372 + 1.2841 - 0.73764);
+    CHECK(ratio == doctest::Approx((gain_half / gain_full) * (gain_half / gain_full)).epsilon(0.02));
+}
+
+TEST_CASE("Center voice follows the measured falling mix gain") {
+    auto sample = [](bool authentic, float mix) {
+        SuperSaw ss;
+        ss.Init(kSampleRate);
+        ss.SetFreq(1.0f);
+        ss.SetVoiceCount(1);
+        ss.SetAuthentic(authentic);
+        ss.SetMix(mix);
+        for (int i = 0; i < 2000; ++i) ss.Process();
+        return ss.Process();
+    };
+    for (bool authentic : {true, false}) {
+        const float zero = sample(authentic, 0.0f);
+        const float half = sample(authentic, 0.5f);
+        const float full = sample(authentic, 1.0f);
+        CHECK(half / zero == doctest::Approx(
+            (0.99785f - 0.55366f * 0.5f) / 0.99785f).epsilon(0.01));
+        CHECK(full / zero == doctest::Approx(
+            (0.99785f - 0.55366f) / 0.99785f).epsilon(0.01));
+    }
 }
 
 // ============================================================================
@@ -741,6 +762,45 @@ static double toneMagnitude(const std::vector<float>& samples, double freq) {
         imag += samples[i] * std::sin(phase);
     }
     return std::sqrt(real * real + imag * imag) / samples.size();
+}
+
+TEST_CASE("Full detune contains the seven measured JP-8000 frequencies") {
+    // Szabo's Table 1: signed frequency offsets at full detune. These targets
+    // distinguish the measured spread from the previous one-semitone cap.
+    const double offsets[] = {0.0, 0.01991221, -0.01952356,
+                              0.06216538, -0.06288439,
+                              0.10745242, -0.11002313};
+    const auto authentic = collectSamples(true, 440.0f, 1.0f, 1.0f, 9600, 192000);
+    const auto modern = collectSamples(false, 440.0f, 1.0f, 1.0f, 9600, 192000);
+    for (const double offset : offsets) {
+        const double frequency = 440.0 * (1.0 + offset);
+        const double fixed_magnitude = toneMagnitude(authentic, frequency);
+        const double float_magnitude = toneMagnitude(modern, frequency);
+        INFO("target=" << frequency << " fixed=" << fixed_magnitude
+             << " float=" << float_magnitude);
+        CHECK(fixed_magnitude > 0.003);
+        CHECK(float_magnitude > 0.003);
+        CHECK(fixed_magnitude / float_magnitude > 0.5);
+        CHECK(fixed_magnitude / float_magnitude < 2.0);
+    }
+}
+
+TEST_CASE("Half detune uses the measured nonlinear control curve") {
+    // Szabo's polynomial is about 0.098 at knob midpoint. The widest pair
+    // should therefore sit about +/-1.1% from the center, not +/-5%.
+    const double shaped_half = 0.097955;
+    const double outer[] = {0.10745242, -0.11002313};
+    for (bool authentic : {true, false}) {
+        const auto samples = collectSamples(authentic, 440.0f, 0.5f, 1.0f,
+                                            9600, 384000);
+        for (double offset : outer) {
+            const double frequency = 440.0 * (1.0 + shaped_half * offset);
+            const double magnitude = toneMagnitude(samples, frequency);
+            INFO("target=" << frequency << " authentic=" << authentic
+                 << " magnitude=" << magnitude);
+            CHECK(magnitude > 0.003);
+        }
+    }
 }
 
 static double signalRms(const std::vector<float>& samples) {
@@ -1521,11 +1581,12 @@ TEST_CASE("Stereo: spread>0 creates L/R difference") {
 }
 
 TEST_CASE("Stereo: center osc equal in both channels") {
-    // mix=0 -> only center osc. With spread=1, L and R should still match
-    // because center osc (i=0) is not panned.
+    // One voice isolates the center, which is never panned. Mix zero leaves
+    // a small side level, so voice count is needed to isolate it here.
     SuperSaw ss;
     ss.Init(kSampleRate);
     ss.SetFreq(440.0f);
+    ss.SetVoiceCount(1);
     ss.SetDetune(0.5f);
     ss.SetMix(0.0f);
     ss.SetSpread(1.0f);
@@ -1780,22 +1841,21 @@ TEST_CASE("Voice count: invalid values clamped") {
     for (int i = 0; i < 100; i++) ss.Process();
 }
 
-TEST_CASE("Voice count: 1 voice ignores detune and mix") {
-    // With 1 voice, only center osc is active. Mix only scales side oscs,
-    // detune only shifts side oscs. Output should be identical regardless.
+TEST_CASE("Voice count: 1 voice ignores detune") {
+    // Detune shifts only side oscillators, so it cannot affect one voice.
     SuperSaw ss_a;
     ss_a.Init(kSampleRate);
     ss_a.SetFreq(440.0f);
     ss_a.SetVoiceCount(1);
     ss_a.SetDetune(0.0f);
-    ss_a.SetMix(0.0f);
+    ss_a.SetMix(0.5f);
 
     SuperSaw ss_b;
     ss_b.Init(kSampleRate);
     ss_b.SetFreq(440.0f);
     ss_b.SetVoiceCount(1);
     ss_b.SetDetune(1.0f);
-    ss_b.SetMix(1.0f);
+    ss_b.SetMix(0.5f);
 
     // Settle smoothers
     for (int i = 0; i < 4000; i++) {

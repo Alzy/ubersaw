@@ -49,16 +49,16 @@ docs/               — algorithm.md, build-guide.md, controls.md
 
 - 7 oscillators (`NUM_OSCS = 7`) as 24-bit signed phase accumulators
 - Integer overflow at 24-bit boundary IS the sawtooth discontinuity (no wavetable)
-- Asymmetric detune table: `{0, 128, -128, 816, -824, 1408, -1440}`
-- Detuning is pitch-proportional: `voice_detune = (kDetuneTable[i] * pitch * detune) >> 7`
-- Center osc at full volume, 6 side oscs scaled by mix parameter
+- Asymmetric measured full-detune frequency offsets: `{0, +0.01991221, -0.01952356, +0.06216538, -0.06288439, +0.10745242, -0.11002313}`
+- Detuning is pitch-proportional: `voice_detune = pitch * shaped_detune * kDetuneRatios[i]`
+- Center and side gains follow Adam Szabo's measured mix curves
 - One-pole pitch-tracked HPF on output
 - xorshift32 PRNG randomizes phases on gate trigger
 
 ### Dual Processing Modes
 
-- `ProcessAuthentic()` — 24-bit fixed-point, matches original TC170C140 hardware
-- `ProcessFloat()` — floating-point approximation for A/B comparison
+- `ProcessAuthentic()` — 24-bit saw phases, measured control mapping, and a wide mixer
+- `ProcessFloat()` — floating-point version of the same control mapping for A/B comparison
 - Selected via `SetAuthentic(bool)`, defaults to `true`
 
 ### Audio Config
@@ -69,14 +69,14 @@ docs/               — algorithm.md, build-guide.md, controls.md
 
 ## Key Conventions
 
-### Wrap24 After Every Arithmetic Op
+### Wrap24 For Saw Phase Accumulators
 
-Every operation that could exceed 24-bit range MUST be followed by `Wrap24()`.
-This is critical for matching original hardware overflow behavior.
+Each saw phase wraps at 24 bits. The seven-voice mixer sum and high-pass
+filter retain wider values so coincident saw edges do not wrap the mix.
 
 ```cpp
 saw_[i] = Wrap24(saw_[i] + pitch_inc_ + voice_detune);
-sum = Wrap24(sum + saw_[i]);
+sum += static_cast<int32_t>(saw_[i] * gain);
 ```
 
 ### Knob + CV Parameter Pattern
@@ -90,7 +90,7 @@ All parameters follow: `final = clamp(knob + (cv_bipolar * 0.5), 0.0, 1.0)`
 ### Naming
 
 - Private members: `trailing_underscore_` (e.g., `pitch_inc_`, `sample_rate_`)
-- Static constants: `kCamelCase` (e.g., `kDetuneTable`)
+- Static constants: `kCamelCase` (e.g., `kDetuneRatios`)
 - Public methods: `CamelCase`, helper functions: `camelCase`
 
 ### 24-bit Constants

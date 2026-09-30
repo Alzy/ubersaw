@@ -1,14 +1,14 @@
 # ÜBERSAW
 
-**A faithful recreation of the Roland JP-8000 supersaw algorithm for Eurorack.**
+**A JP-8000 supersaw recreation for Eurorack.**
 
-ÜBERSAW runs the exact reverse-engineered supersaw algorithm from the Roland JP-8000 on the [Electro-Smith Daisy Patch Init](https://electro-smith.com/products/patch-init) hardware platform. Not an approximation — a true recreation using the 7-oscillator, 24-bit fixed-point architecture discovered by silicon-level reverse engineering of Roland's custom TC170C140 DSP chip, [presented at 39C3](https://www.youtube.com/watch?v=XM_q5T7wTpQ) (Chaos Communication Congress, December 2025).
+ÜBERSAW runs a seven-oscillator, 24-bit phase-accumulator model on the [Electro-Smith Daisy Patch Init](https://electro-smith.com/products/patch-init). Its oscillator structure follows the TC170C140 DSP reverse engineering [presented at 39C3](https://www.youtube.com/watch?v=XM_q5T7wTpQ); its detune and mix controls follow [Adam Szabo's measurements of JP-8000 output](https://www.adamszabo.com/internet/adam_szabo_how_to_emulate_the_super_saw.pdf). Exact hardware matching still needs a direct audio comparison.
 
-The JP-8000's Supersaw oscillator — seven detuned sawtooth waves through a pitch-tracked high-pass filter — defined the sound of trance music from Darude's *Sandstorm* to an entire generation of electronic music. For nearly 30 years the exact algorithm was unknown. Now it runs in your rack.
+The JP-8000's Supersaw oscillator — seven detuned sawtooth waves through a pitch-tracked high-pass filter — defined the sound of trance music from Darude's *Sandstorm* to an entire generation of electronic music. This project brings that oscillator structure to Eurorack.
 
 ## Features
 
-- **Exact algorithm** — 7 naive sawtooth phase accumulators with the original asymmetric detune table `{0, 128, -128, 816, -824, 1408, -1440}`, matching the reverse-engineered TC170C140 ESP2 firmware
+- **Measured detune** — 7 naive sawtooth phase accumulators with Szabo's asymmetric frequency offsets and nonlinear detune control
 - **24-bit fixed-point arithmetic** — emulates the integer overflow wrapping behavior of the original hardware that gives the supersaw its unique character
 - **96 kHz sample rate** — closest available match to the JP-8000's internal 88.2 kHz, preserving the aliasing characteristics that contribute brightness without harshness
 - **Pitch-tracked high-pass filter** — removes sub-fundamental aliasing products, just like the original
@@ -72,16 +72,11 @@ See [docs/build-guide.md](docs/build-guide.md) for detailed platform-specific se
 
 ## How it works
 
-The JP-8000 supersaw is remarkably simple. Seven sawtooth oscillators are generated as raw phase accumulators in 24-bit integer arithmetic — no wavetables, no anti-aliasing, no band-limiting. The integer overflow at the 24-bit boundary *is* the sawtooth discontinuity. Each oscillator is detuned by a fixed asymmetric offset scaled by pitch and a user detune parameter. The center oscillator plays at full volume; the six side oscillators are scaled by a mix parameter. The summed output passes through a single high-pass filter tracking the fundamental frequency.
+Seven sawtooth oscillators are generated as raw 24-bit phase accumulators — no wavetables or band limiting. The phase wrap *is* the sawtooth discontinuity. Each side oscillator uses a measured asymmetric frequency offset scaled by pitch and the shaped detune control. The mix control lowers the center level and follows a separate gain curve for the six side oscillators. The wide summed output passes through a high-pass filter tracking the fundamental frequency.
 
-```
-pitch ──┬── saw[0] ────────── × 1.0 ──┐
-        ├── saw[1] (+detune) ── × mix ─┤
-        ├── saw[2] (-detune) ── × mix ─┤
-        ├── saw[3] (+detune) ── × mix ─┼── Σ ── HPF ── out
-        ├── saw[4] (-detune) ── × mix ─┤
-        ├── saw[5] (+detune) ── × mix ─┤
-        └── saw[6] (-detune) ── × mix ─┘
+```text
+pitch -> seven 24-bit saw phases -> measured center/side mix gains
+      -> wide sum -> pitch-tracked high-pass filter -> output
 ```
 
 See [docs/algorithm.md](docs/algorithm.md) for the complete technical breakdown.

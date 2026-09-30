@@ -26,7 +26,7 @@
 |------|--------|-------------|-------|----------|
 | K1   | PITCH  | `CV_5`      | 0.0-1.0 | Coarse pitch select. Spans C1 (~32 Hz) to C7 (~2093 Hz). Sets the base note before V/Oct CV is applied. |
 | K2   | DETUNE | `CV_6`      | 0.0-1.0 | Detune spread amount. 0 = all oscillators in unison (single saw). Max = full JP-8000 detune spread. |
-| K3   | MIX    | `CV_7`      | 0.0-1.0 | Balance between center and side oscillators. 0 = center only. 1.0 = side oscillators at full volume. This is the JP-8000's "Mix" knob. |
+| K3   | MIX    | `CV_7`      | 0.0-1.0 | Measured JP-8000 center/side balance. The side oscillators retain a small level at 0; the center falls as mix rises. |
 | K4   | TONE   | `CV_8`      | 0.0-1.0 | High-pass filter cutoff offset from the pitch-tracked default. Low = less filtering (more bass). High = HPF at/above fundamental (tighter, brighter). |
 
 ## CV inputs
